@@ -2,7 +2,7 @@
 
 Find, control, watch and troubleshoot LIFX lights from Linux, without the phone app.
 
-I have a LIFX LED strip behind my TV that kept vanishing from the LIFX iOS app. The only fix
+I have a LIFX LED strip behind my TV that keep showing it is not responding in LIFX SmartPhone app. The only fix
 was unplugging it and plugging it back in. `lifxctl` talks to the lights directly over your home
 network (the LIFX LAN protocol on UDP 56700), so it works even when the app says a light is offline.
 It also helps you work out *why* a light keeps dropping off or turning itself off.
