@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/lifxctl-banner.svg" alt="lifxctl: find, control, watch and diagnose your smart lights" width="720">
+</p>
+
 # lifxctl
 
 Find, control, watch and troubleshoot LIFX lights from Linux, without the phone app.
