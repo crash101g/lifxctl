@@ -6,7 +6,7 @@
 
 [![tests](https://github.com/crash101g/lifxctl/actions/workflows/test.yml/badge.svg)](https://github.com/crash101g/lifxctl/actions/workflows/test.yml)
 ![platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)
-![python](https://img.shields.io/badge/python-3.8%2B-blue)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
 
 Find, control, watch and troubleshoot LIFX lights from Linux, macOS or Windows, without the phone app.
 
@@ -15,7 +15,7 @@ was unplugging it and plugging it back in. `lifxctl` talks to the lights directl
 network (the LIFX LAN protocol on UDP 56700), so it works even when the app says a light is offline.
 It also helps you work out *why* a light keeps dropping off or turning itself off.
 
-Single Python file, no dependencies (Python 3.8+). Runs on Linux, macOS and Windows; the test
+Single Python file, no dependencies (Python 3.9+). Runs on Linux, macOS and Windows; the test
 suite runs on all three on every push.
 
 ## What it does

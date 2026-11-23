@@ -2,7 +2,7 @@
 """
 lifxctl.py - find, control and reboot LIFX lights (bulbs, LED strips, Beams) on the LAN.
 
-Uses the LIFX LAN protocol (UDP 56700) directly. No extra packages, Python 3.8+.
+Uses the LIFX LAN protocol (UDP 56700) directly. No extra packages, Python 3.9+.
 Runs on Linux, macOS and Windows (on Windows: `py lifxctl.py ...`).
 
   lifxctl.py                            # interactive menu
