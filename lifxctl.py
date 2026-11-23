@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-lifxctl.py — find, control and reboot LIFX lights (bulbs, LED strips, Beams) on the LAN.
+lifxctl.py - find, control and reboot LIFX lights (bulbs, LED strips, Beams) on the LAN.
 
 Uses the LIFX LAN protocol (UDP 56700) directly. No extra packages, Python 3.8+.
+Runs on Linux, macOS and Windows (on Windows: `py lifxctl.py ...`).
 
   lifxctl.py                            # interactive menu
   lifxctl.py scan                       # broadcast + sweep local /24 on UDP 56700, plus ARP check
@@ -27,11 +28,14 @@ A target is an IP, a MAC (d0:73:d5:xx:xx:xx), a label (case-insensitive substrin
 Common options (put before the command):
   --subnet 192.168.1.0/24   sweep this range instead of the auto-detected /24
   --no-sweep                broadcast only, no per-IP sweep
-  --log FILE                log file (default ~/.local/state/lifxctl/lifxctl.log, rotated 1 MB x 5)
+  --log FILE                log file (default: lifxctl.log in the data folder, rotated 1 MB x 5)
   --no-log                  don't write a log file
   -v / --verbose            debug logging: every packet sent and received
   -q / --quiet              console shows warnings only (log file still gets everything)
-  --cache FILE              known-devices file (default ~/.local/state/lifxctl/devices.json)
+  --cache FILE              known-devices file (default: devices.json in the data folder)
+
+Data folder: ~/.local/state/lifxctl (Linux), ~/Library/Application Support/lifxctl (macOS),
+%LOCALAPPDATA%\\lifxctl (Windows).
 
 Every device seen is remembered (IP, MAC, label, product, last power, first/last seen).
 Discovery also probes each remembered IP directly, so devices are found even when the
@@ -53,10 +57,31 @@ import re
 import random
 import socket
 import struct
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+
+
+def _app_dirs():
+    """(state dir, config dir) in the usual place for each OS."""
+    if IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        roaming = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(local, "lifxctl"), os.path.join(roaming, "lifxctl")
+    if IS_MACOS:
+        d = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "lifxctl")
+        return d, d
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    config = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(state, "lifxctl"), os.path.join(config, "lifxctl")
+
+
+STATE_DIR, CONFIG_DIR = _app_dirs()
 
 PORT = 56700
 SRC = random.randint(2, 0xFFFFFFFF)
@@ -87,7 +112,7 @@ class Cache:
         if not path:
             return
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 self.devices = json.load(f).get("devices", {})
         except FileNotFoundError:
             pass
@@ -128,7 +153,7 @@ class Cache:
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"version": 1, "devices": self.devices}, f, indent=2, sort_keys=True)
             os.replace(tmp, self.path)
             self.dirty = False
@@ -267,7 +292,8 @@ def link_quality(sock, ip, mac, n=20, gap=0.1, timeout=0.5):
 
 def discover(sock, subnet=None, timeout=3.0, use_cache=True):
     """Broadcast GetService (+ unicast sweep of subnet, + remembered IPs). Returns {ip: mac}."""
-    targets = ["255.255.255.255"]
+    bcasts = broadcast_addresses(subnet)
+    targets = []
     if subnet:
         targets += [str(h) for h in ipaddress.ip_network(subnet, strict=False).hosts()]
     if use_cache:
@@ -276,12 +302,13 @@ def discover(sock, subnet=None, timeout=3.0, use_cache=True):
     global _sweeping
     msg = frame(GET_SERVICE)
     found = {}
-    log.debug(f"discover: GetService -> broadcast" + (f" + {len(targets) - 1} hosts in {subnet}" if subnet else ""))
+    log.debug(f"discover: GetService -> {', '.join(bcasts)}" + (f" + {len(targets)} hosts" if targets else ""))
     for _ in range(2):
-        send(sock, msg, targets[0])
+        for b in bcasts:
+            send(sock, msg, b)
         _sweeping = True
         try:
-            for t in targets[1:]:
+            for t in targets:
                 send(sock, msg, t)
         finally:
             _sweeping = False
@@ -335,25 +362,87 @@ def local_subnet():
     return str(ipaddress.ip_network(ip + "/24", strict=False))
 
 
+def broadcast_addresses(subnet=None):
+    """255.255.255.255 plus the directed broadcast of the local (or given) subnet.
+    The directed one matters on macOS/Windows machines with several network adapters."""
+    out = ["255.255.255.255"]
+    net = subnet or local_subnet()
+    if net:
+        try:
+            b = str(ipaddress.ip_network(net, strict=False).broadcast_address)
+            if b not in out and not b.startswith("127."):
+                out.append(b)
+        except ValueError:
+            pass
+    return out
+
+
 def pick_subnet(args):
     if args.no_sweep:
         return None
     return args.subnet or local_subnet()
 
 
-def arp_lifx():
-    """LIFX MACs (OUI d0:73:d5) currently resolved in the kernel ARP table."""
-    out = {}
+def norm_mac(text):
+    """'D0-73-D5-A-BB-C' / 'd0:73:d5:0a:bb:0c' -> 'd0:73:d5:0a:bb:0c' (macOS drops leading zeros)."""
+    parts = re.split(r"[:-]", text.strip().lower())
+    if len(parts) != 6:
+        return None
     try:
-        with open("/proc/net/arp") as f:
-            next(f)
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 4 and parts[2] != "0x0" and parts[3].lower().startswith(LIFX_OUI):
-                    out[parts[0]] = parts[3].lower()
-    except OSError:
-        pass
+        return ":".join(f"{int(x, 16):02x}" for x in parts)
+    except ValueError:
+        return None
+
+
+_ARP_LINE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})\D+?((?:[0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2})(?![0-9a-fA-F])")
+
+
+def parse_arp_output(text):
+    """Parse `arp -a` (Windows) / `arp -an` (macOS, BSD, Linux net-tools) output into {ip: mac}.
+    Incomplete entries have no MAC and are skipped."""
+    out = {}
+    for line in text.splitlines():
+        m = _ARP_LINE.search(line)
+        if m:
+            mac = norm_mac(m.group(2))
+            if mac and mac != "ff:ff:ff:ff:ff:ff" and mac != "00:00:00:00:00:00":
+                out[m.group(1)] = mac
     return out
+
+
+def parse_proc_arp(text):
+    """Parse Linux /proc/net/arp into {ip: mac}, skipping incomplete (flags 0x0) entries."""
+    out = {}
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] != "0x0":
+            mac = norm_mac(parts[3])
+            if mac and mac != "00:00:00:00:00:00":
+                out[parts[0]] = mac
+    return out
+
+
+def arp_table():
+    """{ip: mac} from the OS neighbour/ARP cache."""
+    if os.path.exists("/proc/net/arp"):
+        try:
+            with open("/proc/net/arp", encoding="utf-8", errors="replace") as f:
+                return parse_proc_arp(f.read())
+        except OSError:
+            pass
+    cmd = ["arp", "-a"] if IS_WINDOWS else ["arp", "-an"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        log.debug(f"arp table unavailable: {e}")
+        return {}
+    return parse_arp_output(res.stdout)
+
+
+def arp_lifx():
+    """LIFX MACs (OUI d0:73:d5) currently in the ARP table: {ip: mac}."""
+    return {ip: mac for ip, mac in arp_table().items() if mac.startswith(LIFX_OUI)}
 
 
 def ip_sort(items):
@@ -395,7 +484,7 @@ def resolve(sock, args, targets):
                 else:
                     log.warning(f"{t}: known device '{d.get('label', '?')}' {key} "
                                 f"(last seen {d.get('last_seen', '?')} at {d.get('ip', '?')}) is not answering"
-                                f" — run 'scan' if its IP changed")
+                                f" - run 'scan' if its IP changed")
             if not known:
                 log.warning(f"{t}: no matching LIFX device found")
         chosen.update(hits)
@@ -518,7 +607,7 @@ def cmd_reboot(sock, args):
         if pending:
             time.sleep(2)
     for mac, ip in pending.items():
-        log.warning(f"Not back after {args.wait}s: {ip} {fmt_mac(mac)} — try 'scan', or power-cycle it")
+        log.warning(f"Not back after {args.wait}s: {ip} {fmt_mac(mac)} - try 'scan', or power-cycle it")
     return 1 if pending else 0
 
 
@@ -674,7 +763,7 @@ def latest_firmware():
     cache_file = os.path.join(STATE_DIR, "firmware.json")
     cached = {}
     try:
-        with open(cache_file) as f:
+        with open(cache_file, encoding="utf-8") as f:
             cached = json.load(f)
         if time.time() - cached.get("fetched", 0) < 86400:
             return {tuple(v) for v in cached["versions"]}, cached.get("title", ""), False
@@ -692,7 +781,7 @@ def latest_firmware():
             versions = {(int(a), int(b)) for a, b in re.findall(r"\bv?(\d)\.(\d{2})\b", h.group(1) if h else "")}
         if versions:
             os.makedirs(STATE_DIR, exist_ok=True)
-            with open(cache_file, "w") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump({"fetched": time.time(), "title": title, "versions": sorted(versions)}, f)
             log.debug(f"firmware page: {title}")
             return versions, title, False
@@ -743,7 +832,6 @@ def cmd_firmware(sock, args):
 
 # ------------------------------------------------------------------ scenes ---
 API_BASE = os.environ.get("LIFX_API_BASE", "https://api.lifx.com/v1")
-CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "lifxctl")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 
 
@@ -753,7 +841,7 @@ def _scenes_file():
 
 def load_scenes():
     try:
-        with open(_scenes_file()) as f:
+        with open(_scenes_file(), encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
         data = {}
@@ -765,7 +853,7 @@ def load_scenes():
 def save_scenes(data):
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = _scenes_file() + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, _scenes_file())
 
@@ -775,7 +863,7 @@ def get_token():
     if tok:
         return tok
     try:
-        with open(TOKEN_FILE) as f:
+        with open(TOKEN_FILE, encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""
@@ -784,10 +872,13 @@ def get_token():
 def set_token(tok):
     os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(tok.strip() + "\n")
-    os.chmod(TOKEN_FILE, 0o600)
-    log.info(f"LIFX token saved to {TOKEN_FILE} (mode 600)")
+    try:
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    log.info(f"LIFX token saved to {TOKEN_FILE}" + ("" if IS_WINDOWS else " (mode 600)"))
 
 
 def api(method, path, body=None, timeout=15):
@@ -1248,7 +1339,8 @@ USEFUL COMMANDS
   lifxctl.py diagnose              run all checks and get a fix list
   lifxctl.py watch --interval 60   log DOWN / BACK / REBOOTED / POWER changes
   lifxctl.py firmware              firmware, Wi-Fi dBm, uptime
-  grep -E "DOWN|BACK|REBOOT|POWER" {log}
+  grep -E "DOWN|BACK|REBOOT|POWER" {log}                     (Linux/macOS)
+  findstr "DOWN BACK REBOOT POWER" "{log}"                    (Windows)
 """
 
 
@@ -1290,7 +1382,7 @@ def _log_history(days=7):
     out = {}
     for fn in files:
         try:
-            with open(fn, errors="replace") as f:
+            with open(fn, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     m = pat.match(line.rstrip("\n"))
                     if not m:
@@ -1460,13 +1552,9 @@ def cmd_diagnose(sock, args):
 def cmd_guide(sock, args):
     text = GUIDE.format(log=LOGPATH or DEFAULT_LOG)
     if sys.stdout.isatty() and not getattr(args, "no_pager", False):
-        pager = os.environ.get("PAGER", "less")
-        try:
-            import subprocess
-            subprocess.run([pager, "-R"] if pager == "less" else [pager], input=text.encode(), check=False)
-            return 0
-        except OSError:
-            pass
+        import pydoc
+        pydoc.pager(text)  # less on Linux/macOS, more on Windows
+        return 0
     print(text)
     return 0
 
@@ -1606,7 +1694,7 @@ def _show_log(args, n):
     if not path or not os.path.exists(path):
         print("No log file (logging disabled or nothing written yet).")
         return
-    with open(path, errors="replace") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()[-n:]
     print(f"--- last {len(lines)} lines of {path} ---")
     print("".join(lines).rstrip())
@@ -1623,7 +1711,6 @@ def _dur(sec):
 
 
 # ------------------------------------------------------------------ logging ---
-STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "lifxctl")
 DEFAULT_LOG = os.path.join(STATE_DIR, "lifxctl.log")
 DEFAULT_CACHE = os.path.join(STATE_DIR, "devices.json")
 LOGPATH = None  # set in main()
@@ -1662,7 +1749,7 @@ def setup_logging(args):
     path = os.path.expanduser(args.log or DEFAULT_LOG)
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        fh = logging.handlers.RotatingFileHandler(path, maxBytes=1_000_000, backupCount=5)
+        fh = logging.handlers.RotatingFileHandler(path, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
     except OSError as e:
         log.warning(f"can't open log file {path}: {e} (console only)")
         return None
@@ -1671,6 +1758,28 @@ def setup_logging(args):
         "%(asctime)s %(levelname)-7s [%(process)d] %(message)s", "%Y-%m-%d %H:%M:%S"))
     log.addHandler(fh)
     return path
+
+
+def make_socket():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    if IS_WINDOWS and hasattr(socket, "SIO_UDP_CONNRESET"):
+        # otherwise every unanswered sweep packet makes recvfrom() raise WSAECONNRESET
+        try:
+            sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+        except (OSError, ValueError):
+            pass
+    sock.bind(("", 0))
+    return sock
+
+
+def _console_setup():
+    """Never crash on a character the console can't show (old Windows code pages)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 # --------------------------------------------------------------------- main ---
@@ -1741,6 +1850,7 @@ def main():
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--misses", type=int, default=2, help="missed scans before DOWN (default 2)")
 
+    _console_setup()
     args = ap.parse_args()
     args.cmd = args.cmd or "menu"
     args.logpath = LOGPATH = setup_logging(args)
@@ -1754,8 +1864,7 @@ def main():
     CACHE = Cache(os.path.expanduser(args.cache or DEFAULT_CACHE))
     atexit.register(CACHE.save)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock = make_socket()
 
     try:
         rc = {

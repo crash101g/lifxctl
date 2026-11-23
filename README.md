@@ -4,14 +4,19 @@
 
 # lifxctl
 
-Find, control, watch and troubleshoot LIFX lights from Linux, without the phone app.
+[![tests](https://github.com/crash101g/lifxctl/actions/workflows/test.yml/badge.svg)](https://github.com/crash101g/lifxctl/actions/workflows/test.yml)
+![platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)
+![python](https://img.shields.io/badge/python-3.8%2B-blue)
+
+Find, control, watch and troubleshoot LIFX lights from Linux, macOS or Windows, without the phone app.
 
 I have a LIFX LED strip behind my TV that keeps showing it is not responding in the LIFX smartphone app. The only fix
 was unplugging it and plugging it back in. `lifxctl` talks to the lights directly over your home
 network (the LIFX LAN protocol on UDP 56700), so it works even when the app says a light is offline.
 It also helps you work out *why* a light keeps dropping off or turning itself off.
 
-Single Python file, no dependencies (Python 3.8+). Built and used on Pop!_OS / Ubuntu.
+Single Python file, no dependencies (Python 3.8+). Runs on Linux, macOS and Windows; the test
+suite runs on all three on every push.
 
 ## What it does
 
@@ -30,6 +35,11 @@ Single Python file, no dependencies (Python 3.8+). Built and used on Pop!_OS / U
 
 ## Install
 
+Your computer must be on the same home network (LAN/subnet) as the lights. Nothing else to install
+besides Python 3.
+
+**Linux**
+
 ```bash
 git clone https://github.com/crash101g/lifxctl.git
 cd lifxctl
@@ -38,7 +48,35 @@ cd lifxctl
 
 Optional: `sudo ln -s "$PWD/lifxctl.py" /usr/local/bin/lifxctl`
 
-Your PC must be on the same LAN/subnet as the lights.
+**macOS**
+
+```bash
+git clone https://github.com/crash101g/lifxctl.git
+cd lifxctl
+python3 lifxctl.py      # interactive menu
+```
+
+Python 3 comes from <https://www.python.org/downloads/> or `brew install python`. On recent macOS
+versions the first scan may trigger a prompt asking to let Terminal (or iTerm, VS Code, …) find
+devices on your local network. Allow it, or nothing will answer. You can change it later in
+System Settings > Privacy & Security > Local Network.
+
+**Windows**
+
+```powershell
+winget install Python.Python.3.13     # or install from python.org
+git clone https://github.com/crash101g/lifxctl.git   # or "Download ZIP" on GitHub
+cd lifxctl
+py lifxctl.py           # interactive menu
+```
+
+If Windows Defender Firewall asks about Python, allow it on **Private networks**. Also make sure
+your Wi-Fi/Ethernet network is set to *Private*, not *Public* (Settings > Network & internet >
+your network > Network profile type). On a Public profile Windows blocks the lights' replies, and
+scans find nothing.
+
+On macOS and Windows, use `python3 lifxctl.py …` / `py lifxctl.py …` wherever the examples below
+say `./lifxctl.py …`.
 
 ## Quick start
 
@@ -50,6 +88,13 @@ Your PC must be on the same LAN/subnet as the lights.
 ./lifxctl.py diagnose                # why does it keep dropping off / turning off?
 ./lifxctl.py watch --interval 60     # leave running, then check the log
 ```
+
+Leaving `watch` running in the background:
+
+| OS | Command |
+|---|---|
+| Linux / macOS | `nohup ./lifxctl.py -q watch --interval 60 >/dev/null 2>&1 &` |
+| Windows | `start "lifx watch" /min py lifxctl.py -q watch --interval 60` |
 
 ## Commands
 
@@ -83,7 +128,7 @@ App scenes live in your LIFX cloud account, not on the lights. Create a personal
 <https://cloud.lifx.com/settings>, then:
 
 ```bash
-./lifxctl.py token        # paste it (input is hidden). Saved to ~/.config/lifxctl/token, mode 600
+./lifxctl.py token        # paste it (input is hidden). See "Files" below for where it's kept
 ./lifxctl.py scenes
 ./lifxctl.py scene "movie night"
 ```
@@ -108,12 +153,22 @@ patterns, such as drop-offs that always happen around the same hour.
 
 ## Files
 
-| Path | Contents |
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Data folder | `~/.local/state/lifxctl/` | `~/Library/Application Support/lifxctl/` | `%LOCALAPPDATA%\lifxctl\` |
+| Token folder | `~/.config/lifxctl/` | `~/Library/Application Support/lifxctl/` | `%APPDATA%\lifxctl\` |
+
+In the data folder:
+
+| File | Contents |
 |---|---|
-| `~/.local/state/lifxctl/lifxctl.log` | Log (1 MB × 5, rotated) |
-| `~/.local/state/lifxctl/devices.json` | Saved lights |
-| `~/.local/state/lifxctl/scenes.json` | App scene cache + local scenes |
-| `~/.config/lifxctl/token` | LIFX cloud token (mode 600, never written to the log) |
+| `lifxctl.log` | Log (1 MB × 5, rotated) |
+| `devices.json` | Saved lights |
+| `scenes.json` | App scene cache + local scenes |
+| `firmware.json` | Last copy of LIFX's firmware page (refreshed daily) |
+
+The token file is `token` in the token folder. On Linux/macOS it's readable only by you (mode 600).
+It is never written to the log.
 
 ## Limits
 
@@ -121,6 +176,15 @@ patterns, such as drop-offs that always happen around the same hour.
   this script, not the app. Power cycling is the only fix. A smart plug lets you automate that.
 - Firmware can only be installed from the LIFX app. This script only reports what's available.
 - Not affiliated with or endorsed by LIFX.
+
+## Development
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests run the real script against a simulated LIFX light on `127.0.0.1` (`tests/fakelight.py`),
+and GitHub Actions runs them on Linux, macOS and Windows.
 
 ## License
 
